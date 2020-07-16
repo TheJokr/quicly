@@ -30,6 +30,25 @@ typedef double cubic_float_t;
 #define QUICLY_CUBIC_C ((cubic_float_t)0.4)
 #define QUICLY_CUBIC_BETA ((cubic_float_t)0.7)
 
+int num_connections_ = 1;
+
+/* Emulates the effective backoff of an ensemble of N TCP-Reno connections on a single loss event */
+cubic_float_t beta() {
+  return (num_connections_ - 1 + QUICLY_CUBIC_BETA) / num_connections_;
+}
+
+/* Described in Section 3.3 of the CUBIC paper */
+cubic_float_t alpha() {
+  const cubic_float_t beta_ = beta();
+  return 3 * num_connections_ * num_connections_ * (1 - beta_) / (1 + beta_);
+}
+
+/* Emulates the additional backoff of an ensemble of N TCP-Reno connections on a single loss event */
+cubic_float_t betaLastMax() {
+  cubic_float_t quicly_cubic_betaLastMax = (1 + QUICLY_CUBIC_BETA) / 2.0;
+  return (num_connections_ - 1 + quicly_cubic_betaLastMax) / num_connections_;
+}
+
 /* Calculates the time elapsed since the last congestion event (parameter t) */
 static cubic_float_t calc_cubic_t(const quicly_cc_t *cc, int64_t now)
 {
@@ -49,14 +68,14 @@ static uint32_t calc_w_cubic(const quicly_cc_t *cc, cubic_float_t t_sec, uint32_
 static void update_cubic_k(quicly_cc_t *cc, uint32_t max_udp_payload_size)
 {
     cubic_float_t w_max_mss = cc->state.cubic.w_max / (cubic_float_t)max_udp_payload_size;
-    cc->state.cubic.k = cbrt(w_max_mss * ((1 - QUICLY_CUBIC_BETA) / QUICLY_CUBIC_C));
+    cc->state.cubic.k = cbrt(w_max_mss * ((1 - beta()) / QUICLY_CUBIC_C));
 }
 
 /* RFC 8312, Equation 4; using bytes as unit instead of MSS */
 static uint32_t calc_w_est(const quicly_cc_t *cc, cubic_float_t t_sec, cubic_float_t rtt_sec, uint32_t max_udp_payload_size)
 {
-    return (cc->state.cubic.w_max * QUICLY_CUBIC_BETA) +
-           ((3 * (1 - QUICLY_CUBIC_BETA) / (1 + QUICLY_CUBIC_BETA)) * (t_sec / rtt_sec) * max_udp_payload_size);
+    return (cc->state.cubic.w_max * beta()) +
+           alpha() * (t_sec / rtt_sec) * max_udp_payload_size);
 }
 
 /* TODO: Avoid increase if sender was application limited. */
@@ -120,14 +139,14 @@ static void cubic_on_lost(quicly_cc_t *cc, const quicly_loss_t *loss, uint32_t b
     /* w_last_max is initialized to zero; therefore this condition is false when exiting slow start */
     if (cc->state.cubic.w_max < cc->state.cubic.w_last_max) {
         cc->state.cubic.w_last_max = cc->state.cubic.w_max;
-        cc->state.cubic.w_max *= (1.0 + QUICLY_CUBIC_BETA) / 2.0;
+        cc->state.cubic.w_max *= betaLastMax();
     } else {
         cc->state.cubic.w_last_max = cc->state.cubic.w_max;
     }
     update_cubic_k(cc, max_udp_payload_size);
 
     /* RFC 8312, Section 4.5; Multiplicative Decrease */
-    cc->cwnd *= QUICLY_CUBIC_BETA;
+    cc->cwnd *= beta();
     if (cc->cwnd < QUICLY_MIN_CWND * max_udp_payload_size)
         cc->cwnd = QUICLY_MIN_CWND * max_udp_payload_size;
     cc->ssthresh = cc->cwnd;
